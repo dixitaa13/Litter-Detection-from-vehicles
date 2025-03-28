@@ -1,0 +1,500 @@
+import torch
+print("PyTorch version:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("GPU count:", torch.cuda.device_count())
+
+!pip install ultralytics opencv-python-headless pandas numpy torch
+
+import os
+import cv2
+import pandas as pd
+import random
+from tqdm import tqdm
+
+# Parameters
+video_folder = ''
+csv_folder = ''
+output_image_folder = ''
+output_label_folder = ''
+
+# Ensure output folders exist for both train and val splits
+os.makedirs(os.path.join(output_image_folder, 'train'), exist_ok=True)
+os.makedirs(os.path.join(output_image_folder, 'val'), exist_ok=True)
+os.makedirs(os.path.join(output_label_folder, 'train'), exist_ok=True)
+os.makedirs(os.path.join(output_label_folder, 'val'), exist_ok=True)
+
+target_width = 960
+target_height = 540
+
+# Convert bounding box to YOLO format
+def convert_to_yolo_format(original_w, original_h, x1, y1, x2, y2):
+    x_center = (x1 + x2) / 2 / original_w
+    y_center = (y1 + y2) / 2 / original_h
+    width = (x2 - x1) / original_w
+    height = (y2 - y1) / original_h
+    return x_center, y_center, width, height
+
+# Map only 'Litter' label to class ID 0
+def get_class_id(label):
+    if label == 'Litter':
+        return 0  # Only 'Litter' is used
+    return -1
+
+# Process one video
+def process_video(video_path, csv_path, split='train'):
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error reading CSV {csv_path}: {e}")
+        return
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Unable to open video file {video_path}")
+        return
+
+    original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    scale_x = original_width / target_width
+    scale_y = original_height / target_height
+    
+    frame_count = 0
+    video_basename = os.path.splitext(os.path.basename(video_path))[0]
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        annotations = df[df['Frame'] == frame_count]
+        if annotations.empty:
+            frame_count += 1
+            continue
+
+        image_filename = os.path.join(output_image_folder, split, f"{video_basename}_frame_{frame_count:05d}.jpg")
+        cv2.imwrite(image_filename, frame)
+
+        label_filename = os.path.join(output_label_folder, split, f"{video_basename}_frame_{frame_count:05d}.txt")
+        with open(label_filename, 'w') as f:
+            for _, row in annotations.iterrows():
+                label = row['Label']
+                class_id = get_class_id(label)
+                if class_id == -1:
+                    continue  # Skip if not 'Litter'
+
+                x1 = int(row['x1'] * scale_x)
+                y1 = int(row['y1'] * scale_y)
+                x2 = int(row['x2'] * scale_x)
+                y2 = int(row['y2'] * scale_y)
+                
+                x_center, y_center, box_width, box_height = convert_to_yolo_format(original_width, original_height, x1, y1, x2, y2)
+                f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {box_width:.6f} {box_height:.6f}\n")
+        
+        frame_count += 1
+
+    cap.release()
+
+# Process videos into train and val sets
+def process_all_videos(video_folder, csv_folder, split='train'):
+    video_files = [f for f in os.listdir(video_folder) if f.endswith('.mp4')]
+    random.shuffle(video_files)
+    split_index = int(len(video_files) * 0.8)
+    selected_files = video_files[:split_index] if split == 'train' else video_files[split_index:]
+
+    for video_file in tqdm(selected_files, desc=f"Processing {split} videos"):
+        video_path = os.path.join(video_folder, video_file)
+        csv_file = video_file.replace('.mp4', '.csv')
+        csv_path = os.path.join(csv_folder, csv_file)
+        if not os.path.exists(csv_path):
+            print(f"Skipping {video_file}: CSV annotation file {csv_file} not found.")
+            continue
+        process_video(video_path, csv_path, split)
+
+# Process training and validation splits
+process_all_videos(video_folder, csv_folder, split='train')
+process_all_videos(video_folder, csv_folder, split='val')
+
+# Create data.yaml for YOLO
+data_yaml = f"""
+train: 
+val:
+
+nc: 1
+names: ['Litter']
+"""
+
+yaml_path = ''
+with open(yaml_path, 'w') as f:
+    f.write(data_yaml.strip())
+
+print("Processing complete and data.yaml file created.")
+
+import os
+import cv2
+import random
+import matplotlib.pyplot as plt
+
+# Paths to images and labels
+image_folder = ""
+label_folder = ""
+
+# Class names (make sure these match your data.yaml)
+class_names = ["Human", "Litter"]
+
+def visualize_random_image():
+    image_files = [f for f in os.listdir(image_folder) if f.endswith('.jpg')]
+    if not image_files:
+        print("No images found!")
+        return
+
+    image_file = random.choice(image_files)
+    image_path = os.path.join(image_folder, image_file)
+    label_path = os.path.join(label_folder, image_file.replace('.jpg', '.txt'))
+
+    # Load image
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"⚠️ Error: Unable to load image {image_path}")
+        return
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w, _ = img.shape  # Image dimensions
+
+    print(f"📷 Selected Image: {image_file} ({w}x{h})")
+    print(f"📄 Label File: {label_path}")
+
+    # Load labels
+    if os.path.exists(label_path):
+        with open(label_path, "r") as f:
+            lines = f.readlines()
+            if not lines:
+                print("⚠️ Warning: Label file is empty!")
+            for line in lines:
+                print(f"🔹 Label Entry: {line.strip()}")
+                # Expecting: class_id x_center y_center width height
+                class_id, x_center, y_center, box_width, box_height = map(float, line.strip().split())
+                
+                # --- Conversion from YOLO normalized coordinates to pixel coordinates ---
+                # If your labels are in normalized format (values between 0 and 1), use:
+                x1 = int((x_center - box_width / 2) * w)
+                y1 = int((y_center - box_height / 2) * h)
+                x2 = int((x_center + box_width / 2) * w)
+                y2 = int((y_center + box_height / 2) * h)
+                
+                # --- If your labels are already in pixel coordinates, comment the above
+                # and use the following instead:
+                # x1 = int(x_center - box_width / 2)
+                # y1 = int(y_center - box_height / 2)
+                # x2 = int(x_center + box_width / 2)
+                # y2 = int(y_center + box_height / 2)
+                
+                print(f"📏 Bounding Box (Pixels): {x1}, {y1}, {x2}, {y2}")
+
+                # Draw bounding box and label
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label_text = class_names[int(class_id)] if int(class_id) < len(class_names) else "Unknown"
+                cv2.putText(img, label_text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    else:
+        print("⚠️ No label file found for this image!")
+
+    # Display image using matplotlib
+    plt.figure(figsize=(8, 6))
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title(image_file)
+    plt.show()
+
+# Run the visualization function
+visualize_random_image()
+
+
+from ultralytics import YOLO
+import torch
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Check if GPU is available and set the device
+device = "cuda:1" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+
+# Load the YOLO model
+model = YOLO("yolo11x.pt").to(device)
+
+def train_yolov11(data_config, model, epochs=150, img_size=640):
+    """
+    Train the YOLOv11 model from scratch using PyTorch-backed GPU if available.
+
+    Args:
+        data_config (str): Path to the data.yaml file.
+        model (YOLO): YOLO model instance.
+        epochs (int): Number of epochs to train.
+        img_size (int): Image size for training.
+    """
+    try:
+        print("Starting fresh training...")
+        model.train(
+            data=data_config,
+            epochs=epochs,
+            imgsz=img_size,
+            batch=20,
+            device=device,
+            save_period=1,
+            project="my_project",
+            name="my_experiment",
+            workers=0  # Disable multi-processing
+        )
+
+        # Load results from training logs
+        results_path = os.path.join('runs/train/my_experiment', 'results.csv')
+        if os.path.exists(results_path):
+            results_df = pd.read_csv(results_path)
+            print("Training results:")
+            print(results_df.tail())  # Show the last few rows
+
+            # Plot accuracy over epochs
+            plt.figure(figsize=(10, 6))
+            plt.plot(results_df['epoch'], results_df['precision'], label='Precision')
+            plt.plot(results_df['epoch'], results_df['recall'], label='Recall')
+            plt.plot(results_df['epoch'], results_df['mAP_0.5'], label='mAP@0.5')
+            plt.xlabel('Epoch')
+            plt.ylabel('Metric Value')
+            plt.title('Model Performance During Training')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig('training_accuracy_plot.png')
+            plt.show()
+
+        # Predict on a test image and visualize results
+        test_img_path = ""  # Change path accordingly
+        results = model.predict(test_img_path, conf=0.5)
+
+        # Display the prediction
+        if results and len(results):
+            results[0].plot(show=True, save=True, labels=True, img_size=img_size)
+            print("Prediction plotted and saved successfully.")
+        else:
+            print("No predictions made on the test image.")
+
+    except Exception as e:
+        print("An error occurred during training:")
+        print(e)
+
+
+# Path to your data.yaml
+data_config = ''
+
+# Train the YOLO model
+train_yolov11(data_config=data_config, model=model, epochs=150, img_size=640)
+
+
+
+import cv2
+import torch
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from ultralytics import YOLO
+
+# Function to compute Intersection over Union (IoU)
+def compute_iou(box1, box2):
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = box1_area + box2_area - intersection
+    
+    return intersection / union if union > 0 else 0
+
+# Function to process video and compute accuracy
+def test_model_on_video(model, video_path, csv_path, output_video_path=None, iou_threshold=0.2):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Unable to open video file {video_path}")
+        return
+    
+    # Load ground truth bounding boxes
+    df = pd.read_csv(csv_path)
+    
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    # Video writer if needed
+    if output_video_path:
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+    
+    total_detections = 0
+    total_gt_boxes = 0
+    correct_detections = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_id = int(cap.get(cv2.CAP_PROP_POS_FRAMES))  # Get current frame number
+        
+        # Get ground truth boxes for the current frame
+        gt_boxes = df[df['Frame'] == frame_id][['x1', 'y1', 'x2', 'y2']].values
+        total_gt_boxes += len(gt_boxes)  # Count ground truth boxes
+        
+        # Run YOLO on the frame
+        results = model(frame)  # This is where the model does inference
+        
+        for result in results:
+            detected_boxes = result.boxes.xyxy.cpu().numpy()  # Convert to numpy
+            total_detections += len(detected_boxes)  # Count detections
+            
+            for det_box in detected_boxes:
+                best_iou = 0  # Track best IoU for this detected box
+                for gt_box in gt_boxes:
+                    iou = compute_iou(det_box, gt_box)
+                    best_iou = max(best_iou, iou)
+                
+                # Consider it a correct detection if IoU ≥ threshold
+                if best_iou >= iou_threshold:
+                    correct_detections += 1
+                
+                # Draw the detected box
+                x1, y1, x2, y2 = map(int, det_box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green for detected objects
+        
+        # Display frame for debugging
+        plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        plt.axis('off')
+        plt.show()
+        
+        if output_video_path:
+            out.write(frame)
+    
+    cap.release()
+    if output_video_path:
+        out.release()
+    
+    # Compute precision-based accuracy
+    precision = (correct_detections / total_detections) * 100 if total_detections > 0 else 0
+    recall = (correct_detections / total_gt_boxes) * 100 if total_gt_boxes > 0 else 0
+    
+    print(f"Total Ground Truth Boxes: {total_gt_boxes}")
+    print(f"Total Detections: {total_detections}")
+    print(f"Correct Detections: {correct_detections}")
+    print(f"Precision: {precision:.2f}%")
+    print(f"Recall: {recall:.2f}%")  # Recall measures how many GT boxes were correctly detected
+
+# Load YOLO model (force CPU usage)
+model_path = ''
+model = YOLO(model_path)
+
+# Force CPU device
+device = 'cpu'
+model.to(device)
+
+# Paths
+video_path = ''
+csv_path = ''
+output_video_path = ''
+
+# Run detection and generate output video
+test_model_on_video(model, video_path, csv_path, output_video_path)
+
+print(f"Output video saved at {output_video_path}")
+
+
+
+import cv2
+import os
+import torch
+import pandas as pd
+import numpy as np
+from ultralytics import YOLO
+
+# Function to check detection for a single video (only for litter)
+def check_video_for_litter(model, video_path, litter_class_ids):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error opening video file: {video_path}")
+        return 0, []  # No detections
+
+    detected_frames = []
+    total_detections = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_id = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1  # Get frame index
+
+        # Run YOLO on the frame
+        results = model(frame)
+
+        for result in results:
+            # Filter for litter class detections
+            detected_boxes = result.boxes.xyxy.cpu().numpy()
+            class_ids = result.boxes.cls.cpu().numpy()  # Get class IDs
+
+            # Filter detections for litter only
+            litter_detections = detected_boxes[np.isin(class_ids, litter_class_ids)]
+
+            if len(litter_detections) > 0:
+                total_detections += len(litter_detections)
+                detected_frames.append(frame_id)
+                print(f"Detected litter in frame {frame_id} of video {video_path}")
+
+    cap.release()
+    return total_detections, detected_frames
+
+# Function to process all videos in a folder and save results to CSV (only for litter)
+def process_videos_in_folder(model, video_folder, output_csv, litter_class_ids):
+    video_files = [f for f in os.listdir(video_folder) if f.endswith(".mp4")]
+    print(f"Found video files: {video_files}")
+    
+    results = []
+
+    for video_file in video_files:
+        video_path = os.path.join(video_folder, video_file)
+        total_detections, detected_frames = check_video_for_litter(model, video_path, litter_class_ids)
+
+        results.append({
+            "Video Name": video_file,
+            "Total Litter Detections": total_detections,
+            "Frames with Litter Detections": ", ".join(map(str, detected_frames))
+        })
+
+    print("Results collected:")
+    print(results)
+
+    # Save results to CSV
+    try:
+        pd.DataFrame(results).to_csv(output_csv, index=False)
+        print(f"Results saved to CSV successfully at {output_csv}.")
+    except Exception as e:
+        print(f"Error saving CSV: {e}")
+
+# Load YOLO model
+model_path = ''
+model = YOLO(model_path)
+
+# Set device to CPU
+device = torch.device("cpu")
+model.to(device)
+
+# Class IDs for litter (replace with your actual class IDs)
+litter_class_ids = [0]  # Example: IDs for litter classes
+
+# Folder path
+video_folder = './testing_videos'
+
+# Output CSV file
+output_csv = os.path.abspath('./final_csv.csv')
+print(f"Output will be saved to: {output_csv}")
+
+# Run detection check on all videos and save results
+process_videos_in_folder(model, video_folder, output_csv, litter_class_ids)
