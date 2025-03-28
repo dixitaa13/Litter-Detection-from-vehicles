@@ -1,0 +1,121 @@
+!pip install deep-sort-realtime
+import torch
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
+# Load YOLO model
+yolo_model = YOLO("./final_train/my_train_15/weights/last.pt")  # Choose a trained YOLO model
+
+# Initialize DeepSORT Tracker
+tracker = DeepSort(max_age=30)  # Adjust parameters as needed
+
+import cv2
+import numpy as np
+import IPython.display as display
+import PIL.Image
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
+# Paths
+video_path = "./video/20240807074411_clipped.mp4"
+output_path = "./output/20240807074411_clipped.mp4"
+
+# Load YOLO model
+yolo_model = YOLO("./final_train/my_train_15/weights/best.pt")
+
+# Initialize DeepSORT Tracker
+tracker = DeepSort(max_age=30)
+
+# Open video
+cap = cv2.VideoCapture(video_path)
+
+# Get video properties
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+# Output video writer
+out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+
+frame_count = 0  # Track frame number
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret or frame is None or frame.size == 0:
+        print("Warning: Empty frame detected, skipping...")
+        break  # Stop processing if the video ends
+
+    frame_count += 1
+    print(f"Processing Frame {frame_count}...")
+
+    # Run YOLO inference
+    results = yolo_model(frame)
+
+    detections = []  # Store detections (x1, y1, x2, y2, confidence, class_id)
+    for result in results:
+        if result.boxes is None or len(result.boxes.data) == 0:
+            print(f"Frame {frame_count}: No detections.")
+            continue
+
+        for box in result.boxes.data:
+            x1, y1, x2, y2, conf, class_id = box.tolist()
+
+            # Scale if needed (normalize check)
+            if x1 < 1 and y1 < 1 and x2 < 1 and y2 < 1:
+                x1 *= width
+                y1 *= height
+                x2 *= width
+                y2 *= height
+
+            # Convert to integers
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+            # Ensure valid coordinates
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+
+            width_box = x2 - x1
+            height_box = y2 - y1
+
+            # Skip invalid detections
+            if width_box <= 0 or height_box <= 0:
+                continue
+
+            print(f"Detected Object - Class: {class_id}, Confidence: {conf:.2f}, BBox: ({x1}, {y1}, {x2}, {y2})")
+            detections.append(([x1, y1, width_box, height_box], conf, int(class_id)))
+
+    # Update tracker
+    tracked_objects = tracker.update_tracks(detections, frame=frame) if detections else []
+
+    # Draw bounding boxes
+    has_boxes = False
+    for obj in tracked_objects:
+        if obj.is_confirmed():
+            has_boxes = True
+            track_id = obj.track_id
+            x1, y1, x2, y2 = map(int, obj.to_ltrb())
+
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+
+            # Draw bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"ID {track_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    if not has_boxes:
+        print(f"Frame {frame_count}: No bounding boxes drawn!")
+
+    # Convert frame to RGB (OpenCV uses BGR)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Convert frame to PIL image and display in Jupyter Notebook
+    
+    display.display(PIL.Image.fromarray(frame_rgb))
+
+    # Save frame
+    out.write(frame)
+
+cap.release()
+out.release()
+print("Processing complete. Output saved at:", output_path)
+
